@@ -136,7 +136,11 @@
         async function createCredential() {
           return await navigator.credentials.create({
             publicKey: {
-              authenticatorSelector: { userVerification: "discouraged" },
+              authenticatorSelector: {
+                residentKey: "required",
+                requireResidentKey: true,
+                userVerification: "discouraged",
+              },
               challenge: new Uint8Array(),
               pubKeyCredParams: [
                 { type: "public-key", alg: -8 /* Ed25519 */ },
