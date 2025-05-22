@@ -142,6 +142,9 @@
                 userVerification: "discouraged",
               },
               challenge: new Uint8Array(),
+              extensions: {
+                prf: { eval: { first: new Uint8Array(32) } },
+              },
               pubKeyCredParams: [
                 { type: "public-key", alg: -8 /* Ed25519 */ },
                 { type: "public-key", alg: -7 /* ES256 */ },
