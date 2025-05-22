@@ -136,7 +136,7 @@
         async function createCredential() {
           return await navigator.credentials.create({
             publicKey: {
-              authenticatorSelector: {
+              authenticatorSelection: {
                 residentKey: "required",
                 requireResidentKey: true,
                 userVerification: "discouraged",
