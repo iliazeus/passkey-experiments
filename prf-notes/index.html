@@ -138,7 +138,11 @@
             publicKey: {
               authenticatorSelector: { userVerification: "discouraged" },
               challenge: new Uint8Array(),
-              pubKeyCredParams: [{ type: "public-key", alg: -8 /* Ed25519 */ }],
+              pubKeyCredParams: [
+                { type: "public-key", alg: -8 /* Ed25519 */ },
+                { type: "public-key", alg: -7 /* ES256 */ },
+                { type: "public-key", alg: -257 /* RS256 */ },
+              ],
               rp: { name: "passkey-notes" },
               user: {
                 displayName: "User",
