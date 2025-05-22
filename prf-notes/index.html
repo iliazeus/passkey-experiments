@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>passkey-notes</title>
+  </head>
+  <body style="display: flex; justify-content: space-around">
+    <main style="width: 100%; max-width: 500px; margin: 12px">
+      <div>
+        <button id="new-key">New encryption key</button>
+        <button id="load">Load and decrypt</button>
+        <button id="save">Encrypt and save</button>
+      </div>
+      <textarea
+        name="note"
+        style="width: 100%; min-height: 5em; resize: vertical"
+        autocomplete="off"
+        placeholder="your secret note"
+      ></textarea>
+      <div id="error" style="display: none; color: darkred"></div>
+      <div id="notif" style="display: none; color: green"></div>
+      <script type="module">
+        let el = {
+          error: document.querySelector("#error"),
+          notif: document.querySelector("#notif"),
+          newKeyButton: document.querySelector("button#new-key"),
+          loadButton: document.querySelector("button#load"),
+          saveButton: document.querySelector("button#save"),
+          textarea: document.querySelector("textarea"),
+        };
+
+        function withErrorReporting(f) {
+          return async (...args) => {
+            el.error.innerText = "";
+            el.error.style.display = "none";
+            try {
+              return await f(...args);
+            } catch (e) {
+              el.error.innerText = e;
+              el.error.style.display = "unset";
+              throw e;
+            }
+          };
+        }
+
+        let notifTimeout = null;
+        function withNotifications(f) {
+          return (...args) =>
+            f(function notify(text) {
+              clearTimeout(notifTimeout);
+              el.notif.innerText = text;
+              el.notif.style.display = "unset";
+              setTimeout(() => {
+                el.notif.innerText = "";
+                el.notif.style.display = "none";
+              }, 3000);
+            }, ...args);
+        }
+
+        function wrapAction(f) {
+          f = withNotifications(f);
+          f = withErrorReporting(f);
+          return f;
+        }
+
+        el.newKeyButton.onclick = wrapAction(async (notify) => {
+          localStorage.removeItem("prf-notes-data");
+          await createCredential();
+          notify("New key created!");
+        });
+
+        el.loadButton.onclick = wrapAction(async (notify) => {
+          let data = localStorage.getItem("prf-notes-data");
+          if (!data) {
+            notify("No data saved!");
+            return;
+          }
+          data = JSON.parse(data);
+
+          let decryptedTextBytes = await decryptWithKeyDerivedFromCredentialPrf(
+            Uint8Array.fromBase64(data.text),
+            {
+              prfSalt: Uint8Array.fromBase64(data.prfSalt),
+              hkdfSalt: Uint8Array.fromBase64(data.hkdfSalt),
+              aesGcmIv: Uint8Array.fromBase64(data.aesGcmIv),
+            }
+          );
+
+          el.textarea.value = new TextDecoder().decode(decryptedTextBytes);
+          notify("Data loaded and decrypted!");
+        });
+
+        el.saveButton.onclick = wrapAction(async (notify) => {
+          let textBytes = new TextEncoder().encode(el.textarea.value);
+          let prfSalt = crypto.getRandomValues(new Uint8Array(32));
+          let hkdfSalt = crypto.getRandomValues(new Uint8Array(32));
+          let aesGcmIv = crypto.getRandomValues(new Uint8Array(32));
+
+          let encryptedTextBytes = await encryptWithKeyDerivedFromCredentialPrf(
+            textBytes,
+            {
+              prfSalt,
+              hkdfSalt,
+              aesGcmIv,
+            }
+          );
+
+          let data = {
+            text: new Uint8Array(encryptedTextBytes).toBase64(),
+            prfSalt: prfSalt.toBase64(),
+            hkdfSalt: hkdfSalt.toBase64(),
+            aesGcmIv: aesGcmIv.toBase64(),
+          };
+
+          localStorage.setItem("prf-notes-data", JSON.stringify(data));
+          notify("Data encrypted and saved!");
+        });
+
+        // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Uint8Array/fromBase64
+        Uint8Array.fromBase64 ??= function fromBase64(s, opts) {
+          if (opts) throw new TypeError("opts not implemented");
+          s = atob(s);
+          let b = new Uint8Array(s.length);
+          for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i);
+          return b;
+        };
+
+        // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Uint8Array/toBase64
+        Uint8Array.prototype.toBase64 ??= function toBase64(opts) {
+          if (opts) throw new TypeError("opts not implemented");
+          let s = String.fromCharCode(...this);
+          return btoa(s);
+        };
+
+        async function createCredential() {
+          return await navigator.credentials.create({
+            publicKey: {
+              authenticatorSelector: { userVerification: "discouraged" },
+              challenge: new Uint8Array(),
+              pubKeyCredParams: [{ type: "public-key", alg: -8 /* Ed25519 */ }],
+              rp: { name: "passkey-notes" },
+              user: {
+                displayName: "User",
+                id: new Uint8Array([0]),
+                name: "user",
+              },
+            },
+          });
+        }
+
+        async function encryptWithKeyDerivedFromCredentialPrf(
+          data,
+          { prfSalt, hkdfSalt, aesGcmIv }
+        ) {
+          let cred = await navigator.credentials.get({
+            publicKey: {
+              challenge: new Uint8Array(),
+              extensions: {
+                prf: { eval: { first: prfSalt } },
+              },
+              userVerification: "discouraged",
+            },
+          });
+
+          let extensions = cred.getClientExtensionResults();
+          if (!extensions.prf) throw new Error("PRF is not supported");
+
+          let material = await crypto.subtle.importKey(
+            "raw",
+            extensions.prf.results.first,
+            "HKDF",
+            /* extractable */ false,
+            ["deriveKey"]
+          );
+
+          let key = await crypto.subtle.deriveKey(
+            {
+              name: "HKDF",
+              hash: "SHA-256",
+              salt: hkdfSalt,
+              info: new TextEncoder().encode("passkey-notes"),
+            },
+            material,
+            { name: "AES-GCM", length: 256 },
+            /* extractable */ false,
+            ["encrypt"]
+          );
+
+          return await crypto.subtle.encrypt(
+            { name: "AES-GCM", iv: aesGcmIv },
+            key,
+            data
+          );
+        }
+
+        async function decryptWithKeyDerivedFromCredentialPrf(
+          data,
+          { prfSalt, hkdfSalt, aesGcmIv }
+        ) {
+          let cred = await navigator.credentials.get({
+            publicKey: {
+              challenge: new Uint8Array(),
+              extensions: {
+                prf: { eval: { first: prfSalt } },
+              },
+              userVerification: "discouraged",
+            },
+          });
+
+          let extensions = cred.getClientExtensionResults();
+          if (!extensions.prf) throw new Error("PRF is not supported");
+
+          let material = await crypto.subtle.importKey(
+            "raw",
+            extensions.prf.results.first,
+            "HKDF",
+            /* extractable */ false,
+            ["deriveKey"]
+          );
+
+          let key = await crypto.subtle.deriveKey(
+            {
+              name: "HKDF",
+              hash: "SHA-256",
+              salt: hkdfSalt,
+              info: new TextEncoder().encode("passkey-notes"),
+            },
+            material,
+            { name: "AES-GCM", length: 256 },
+            /* extractable */ false,
+            ["decrypt"]
+          );
+
+          return await crypto.subtle.decrypt(
+            { name: "AES-GCM", iv: aesGcmIv },
+            key,
+            data
+          );
+        }
+      </script>
+    </main>
+  </body>
+</html>
