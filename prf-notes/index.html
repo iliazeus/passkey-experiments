@@ -21,6 +21,8 @@
       <div id="error" style="display: none; color: darkred"></div>
       <div id="notif" style="display: none; color: green"></div>
       <script type="module">
+        import * as lib from "../lib.js";
+
         let el = {
           error: document.querySelector("#error"),
           notif: document.querySelector("#notif"),
@@ -66,7 +68,7 @@
 
         el.newKeyButton.onclick = wrapAction(async (notify) => {
           localStorage.removeItem("prf-notes-data");
-          await createCredential();
+          await lib.createCredential({ rp: { name: "prf-notes" } });
           notify("New key created!");
         });
 
@@ -78,13 +80,17 @@
           }
           data = JSON.parse(data);
 
-          let decryptedTextBytes = await decryptWithKeyDerivedFromCredentialPrf(
-            Uint8Array.fromBase64(data.text),
-            {
-              prfSalt: Uint8Array.fromBase64(data.prfSalt),
-              hkdfSalt: Uint8Array.fromBase64(data.hkdfSalt),
-              aesGcmIv: Uint8Array.fromBase64(data.aesGcmIv),
-            }
+          let key = await lib.deriveKey({
+            salt: lib.fromBase64(data.salt),
+            info: new TextEncoder().encode("prf-notes"),
+            keyType: { name: "AES-GCM", length: 256 },
+            usage: ["decrypt"],
+          });
+
+          let decryptedTextBytes = await crypto.subtle.decrypt(
+            { name: "AES-GCM", iv: lib.fromBase64(data.iv) },
+            key,
+            lib.fromBase64(data.text)
           );
 
           el.textarea.value = new TextDecoder().decode(decryptedTextBytes);
@@ -92,163 +98,31 @@
         });
 
         el.saveButton.onclick = wrapAction(async (notify) => {
-          let textBytes = new TextEncoder().encode(el.textarea.value);
-          let prfSalt = crypto.getRandomValues(new Uint8Array(32));
-          let hkdfSalt = crypto.getRandomValues(new Uint8Array(32));
-          let aesGcmIv = crypto.getRandomValues(new Uint8Array(32));
+          let salt = crypto.getRandomValues(new Uint8Array(64));
 
-          let encryptedTextBytes = await encryptWithKeyDerivedFromCredentialPrf(
-            textBytes,
-            {
-              prfSalt,
-              hkdfSalt,
-              aesGcmIv,
-            }
+          let key = await lib.deriveKey({
+            salt,
+            info: new TextEncoder().encode("prf-notes"),
+            keyType: { name: "AES-GCM", length: 256 },
+            usage: ["encrypt"],
+          });
+
+          let iv = crypto.getRandomValues(new Uint8Array(32));
+          let encryptedTextBytes = await crypto.subtle.encrypt(
+            { name: "AES-GCM", iv },
+            key,
+            new TextEncoder().encode(el.textarea.value)
           );
 
           let data = {
-            text: new Uint8Array(encryptedTextBytes).toBase64(),
-            prfSalt: prfSalt.toBase64(),
-            hkdfSalt: hkdfSalt.toBase64(),
-            aesGcmIv: aesGcmIv.toBase64(),
+            text: lib.toBase64(encryptedTextBytes),
+            salt: lib.toBase64(salt),
+            iv: lib.toBase64(iv),
           };
 
           localStorage.setItem("prf-notes-data", JSON.stringify(data));
           notify("Data encrypted and saved!");
         });
-
-        // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Uint8Array/fromBase64
-        Uint8Array.fromBase64 ??= function fromBase64(s, opts) {
-          if (opts) throw new TypeError("opts not implemented");
-          s = atob(s);
-          let b = new Uint8Array(s.length);
-          for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i);
-          return b;
-        };
-
-        // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Uint8Array/toBase64
-        Uint8Array.prototype.toBase64 ??= function toBase64(opts) {
-          if (opts) throw new TypeError("opts not implemented");
-          let s = String.fromCharCode(...this);
-          return btoa(s);
-        };
-
-        async function createCredential() {
-          return await navigator.credentials.create({
-            publicKey: {
-              authenticatorSelection: {
-                residentKey: "required",
-                requireResidentKey: true,
-                userVerification: "discouraged",
-              },
-              challenge: new Uint8Array(),
-              extensions: {
-                prf: { eval: { first: new Uint8Array(32) } },
-              },
-              pubKeyCredParams: [
-                { type: "public-key", alg: -8 /* Ed25519 */ },
-                { type: "public-key", alg: -7 /* ES256 */ },
-                { type: "public-key", alg: -257 /* RS256 */ },
-              ],
-              rp: { name: "passkey-notes" },
-              user: {
-                displayName: "User",
-                id: new TextEncoder().encode("user"),
-                name: "user",
-              },
-            },
-          });
-        }
-
-        async function encryptWithKeyDerivedFromCredentialPrf(
-          data,
-          { prfSalt, hkdfSalt, aesGcmIv }
-        ) {
-          let cred = await navigator.credentials.get({
-            publicKey: {
-              challenge: new Uint8Array(),
-              extensions: {
-                prf: { eval: { first: prfSalt } },
-              },
-              userVerification: "discouraged",
-            },
-          });
-
-          let extensions = cred.getClientExtensionResults();
-          if (!extensions.prf) throw new Error("PRF is not supported");
-
-          let material = await crypto.subtle.importKey(
-            "raw",
-            extensions.prf.results.first,
-            "HKDF",
-            /* extractable */ false,
-            ["deriveKey"]
-          );
-
-          let key = await crypto.subtle.deriveKey(
-            {
-              name: "HKDF",
-              hash: "SHA-256",
-              salt: hkdfSalt,
-              info: new TextEncoder().encode("passkey-notes"),
-            },
-            material,
-            { name: "AES-GCM", length: 256 },
-            /* extractable */ false,
-            ["encrypt"]
-          );
-
-          return await crypto.subtle.encrypt(
-            { name: "AES-GCM", iv: aesGcmIv },
-            key,
-            data
-          );
-        }
-
-        async function decryptWithKeyDerivedFromCredentialPrf(
-          data,
-          { prfSalt, hkdfSalt, aesGcmIv }
-        ) {
-          let cred = await navigator.credentials.get({
-            publicKey: {
-              challenge: new Uint8Array(),
-              extensions: {
-                prf: { eval: { first: prfSalt } },
-              },
-              userVerification: "discouraged",
-            },
-          });
-
-          let extensions = cred.getClientExtensionResults();
-          if (!extensions.prf) throw new Error("PRF is not supported");
-
-          let material = await crypto.subtle.importKey(
-            "raw",
-            extensions.prf.results.first,
-            "HKDF",
-            /* extractable */ false,
-            ["deriveKey"]
-          );
-
-          let key = await crypto.subtle.deriveKey(
-            {
-              name: "HKDF",
-              hash: "SHA-256",
-              salt: hkdfSalt,
-              info: new TextEncoder().encode("passkey-notes"),
-            },
-            material,
-            { name: "AES-GCM", length: 256 },
-            /* extractable */ false,
-            ["decrypt"]
-          );
-
-          return await crypto.subtle.decrypt(
-            { name: "AES-GCM", iv: aesGcmIv },
-            key,
-            data
-          );
-        }
       </script>
     </main>
   </body>
